@@ -5,7 +5,7 @@ library(gt)
 
 options(dplyr.summarise.inform = FALSE)
 `%notin%` <- Negate(`%in%`)
-location <- "lw"
+
 
 get_grid_data  <- function(subject, time_lags, gcell_size, location, data){
   df <- data %>% dplyr::select(ID2, paste("signal_", location, sep = ""), t, J) %>% 

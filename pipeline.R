@@ -15,6 +15,7 @@ all_data <- read_csv("all_data.csv")[,-1]
 training_pct <- 0.75 
 threshold <- 0.001
 n_predictors=Inf
+
 data_train <- all_data %>% group_by(ID) %>% 
   mutate( maxJ = max(J)) %>% filter(J <= maxJ*training_pct) %>% dplyr::select(-c(J, maxJ)) %>% ungroup()
 data_test <- all_data %>% group_by(ID) %>% 
@@ -28,4 +29,10 @@ all_predictions <- map_dfr(.x = subjects, n_predictors=n_predictors, train = dat
 summarize_preds(all_predictions = all_predictions)
 # store plot 
 g <- plot_preds(all_predictions = all_predictions)
+g
 
+training_pct <- 0.60
+all_predictions_30 <- map_dfr(.x = subjects, n_predictors=Inf, train = data_train,
+                           test = data_test,threshold = threshold,
+                           .f = fit_model)
+summarize_preds(all_predictions_30)
