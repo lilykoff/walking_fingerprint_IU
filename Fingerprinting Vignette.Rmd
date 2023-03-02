@@ -300,11 +300,11 @@ all_predictions <- map_dfr(.x = subjects, n_predictors=n_predictors, train = dat
 ```{r}
 summarize_preds(all_predictions)
 plot_preds(all_predictions)
-get_roc(all_predictions, individual=T)
+roc <- get_roc(all_predictions, individual=T)
 
 ```
 
-```{r}
+```{r, eval=F}
 data_train <- all_data %>% group_by(ID) %>% 
   filter(J <= 200) %>% dplyr::select(-J) %>% ungroup()
 data_test <- all_data %>% group_by(ID) %>% 
@@ -316,9 +316,334 @@ all_predictions_orig <- map_dfr(.x = subjects, n_predictors=n_predictors, train 
 ```
 
 
-```{r}
+```{r, eval=F}
 summarize_preds(all_predictions_orig)
 plot_preds(all_predictions_orig)
 get_roc(all_predictions_orig, individual=T)
+```
+
+### Distance Metrics 
+
+```{r, eval=FALSE}
+training_pct <- 0.75 
+
+data_train <- all_data %>% group_by(ID) %>% 
+  mutate( maxJ = max(J)) %>% filter(J <= maxJ*training_pct) %>% dplyr::select(-c(J, maxJ)) %>% ungroup()
+data_test <- all_data %>% group_by(ID) %>% 
+  mutate( maxJ = max(J)) %>% filter(J > maxJ*training_pct) %>%  dplyr::select(-c(J, maxJ)) %>% ungroup()
+```
+
+We're interested in looking at a ``distance" between two subjects' data. We consider the Hamming distance, which is the number of bit positions in which the two bits are different between two vectors. For example, 
+
+$$ a = \{1, 2, 0, 0, 7\} $$
+$$b = \{1, 3, 4, 0, 0\} $$ 
+Then Hamming distance$(a,b) = 3$. 
+
+\vspace{.1in}
+
+In this application, we have two sets of vectors that we're interested in comparing. I consider two ways to calculate the Hamming distance between two sets of vectors. Let the training data for subject 1 be represented as follows, where we have $k$ predictors and $j$ rows of data. 
+$$X_{1, train}= \begin{bmatrix} x_{11}& x_{12} &\dots& x_{1 k} \\
+  \vdots & \vdots & \vdots & \vdots \\
+  x_{j 1} & x_{j2} & \dots & x_{jk} \end{bmatrix}$$
+
+Then we can take the mean of each column and round to the nearest integer to get a "summary" vector for the training data, and do the same for the testing data. 
+$$\overline{X}_{1, train} =  \Big[\big\lfloor\frac{1}{j}\sum_{i=1}^jx_{i1}\big\rfloor, \big\lfloor\frac{1}{j}\sum_{i=1}^jx_{i2}\big\rfloor, \dots,  \big\lfloor\frac{1}{j}\sum_{i=1}^j x_{ik}\big\rfloor\Big] $$
+
+Then we would calculate Hamming($\overline{X}_{1, train},\overline{X}_{1, test}$, Hamming($\overline{X}_{1, train},\overline{X}_{2, test}$, and so on for all pairwise combinations of training subjects and testing subjects. In total, there are $32*32 = 1024$ pairs to test. 
+
+\vspace{.1in}
+
+We could instead take the median of each column to get the "summary" vector and calculate the Hamming distances as above with each pairwise combination. 
+
+$$\widetilde{X}_{1, train} = \Big[med(x_{11}, x_{21}, \dots, x_{j1}), med(x_{12}, x_{22}, \dots, x_{j2}),\dots, med(x_{1k}, x_{2k}, \dots, x_{jk})\Big] $$
+
+### Mean Method
+
+```{r}
+train <- rep(seq(1,32,1), each=32)
+test <- rep(seq(1,32,1), 32)
+calculate_distance_mean <- function(subject_train, subject_test, data_train, data_test,binary=FALSE){
+  n <- ncol(data_train %>% dplyr::select(-ID))
+    train_vector <- data_train %>% filter(ID==subject_train) %>% dplyr::select(-ID) %>% summarize(across(all_of(1:n), ~round(mean(.x), 0)))
+    test_vector <- data_test %>% filter(ID==subject_test) %>% dplyr::select(-ID) %>% summarize(across(all_of(1:n), ~round(mean(.x), 0)))
+  sum(train_vector!=test_vector)
+}
+
+distances_mean <- map2_dbl(.x = train, .y = test,
+                          data_train = data_train, data_test=data_test, 
+                          .f = calculate_distance_mean)
+
+distances_mat <- matrix(distances_mean, nrow=32)
+distances_df <- distances_mat %>% data.frame() 
+colnames(distances_df) <- seq(1,32,1)
+distances_df <- distances_df %>% mutate(test_subj = seq(1,32,1))
+
+# i,jth entry is ith subject testing, jth subject training 
+```
+
+```{r}
+long <- distances_df %>% pivot_longer(cols = -test_subj) %>% mutate(name = as.numeric(name)) 
+long$scale <- scale(long$value, center=F)
+ggplot(long, aes(x=test_subj, y =name, fill = scale))+
+  geom_tile()+scale_fill_viridis_c(name = "Normalized Distance", option="magma")+scale_x_continuous(breaks=seq(1,32,1))+
+  scale_y_continuous(breaks=seq(1,32,1))+labs(x = "Test Data Subject", y = "Training Data Subject",
+                                              title = "Distances between Training and Testing Data for Each Subject", subtitle = "Mean Method")+
+  geom_tile(data = long %>% filter(test_subj==name), fill = NA, color = "white", linewidth=.5)
+# keep playing w this 
+
+```
+
+
+### Median Method
+
+```{r}
+calculate_distance <- function(subject_train, subject_test, data_train, data_test,binary=FALSE){
+  n <- ncol(data_train %>% dplyr::select(-ID))
+  if(base::isFALSE(binary)){
+    train_vector <- data_train %>% filter(ID==subject_train) %>% dplyr::select(-ID) %>% summarize(across(all_of(1:n), median))
+    test_vector <- data_test %>% filter(ID==subject_test) %>% dplyr::select(-ID) %>% summarize(across(all_of(1:n), median))
+  }
+  else{
+    train_vector <- data_train %>% filter(ID==subject_train) %>% dplyr::select(-ID) %>% summarize(across(all_of(1:n), median)) %>% mutate(across(1:n, ~ifelse(.x>0, 1, 0)))
+    test_vector <- data_test %>% filter(ID==subject_test) %>% dplyr::select(-ID) %>% summarize(across(all_of(1:n), median)) %>% mutate(across(1:n, ~ifelse(.x>0, 1, 0)))
+  }
+  sum(train_vector!=test_vector)
+}
+
+distances <- map2_dbl(.x = train, .y = test,
+                    data_train = data_train, data_test=data_test, binary=FALSE,
+                    .f = calculate_distance)
+
+```
+
+```{r}
+distances_mat <- matrix(distances, nrow=32)
+# i,jth entry is ith subject testing, jth subject training 
+
+distances_df <- distances_mat %>% data.frame() 
+colnames(distances_df) <- seq(1,32,1)
+distances_df <- distances_df %>% mutate(test_subj = seq(1,32,1))
+
+# max distance = 864, min distance = 0 
+
+long <- distances_df %>% pivot_longer(cols = -test_subj) %>% mutate(name = as.numeric(name)) 
+long$scale <- scale(long$value, center=F)
+
+ggplot(long, aes(x=test_subj, y =name, fill = scale))+
+  geom_tile()+scale_fill_viridis_c(name = "Normalized Distance", option="magma")+scale_x_continuous(breaks=seq(1,32,1))+
+  scale_y_continuous(breaks=seq(1,32,1))+labs(x = "Test Data Subject", y = "Training Data Subject", 
+                                              title = "Distances between Training and Testing Data for Each Subject", subtitle = "Median Method")+
+  geom_tile(data = long %>% filter(test_subj==name), fill = NA, color = "white", linewidth=.5)
+
+```
+
+### A Different Approach to Distances 
+
+We can think of our data as a 3D image, like these: 
+
+
+```{r} 
+
+train_samp <- df_all %>% filter(ID2==2) %>% mutate(maxJ = max(J)) %>% filter(J <= 0.75*maxJ) %>% dplyr::select(signal_lw, t) %>% mutate(
+      lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
+    ) %>% filter(!is.na(lag_signal)) %>% mutate(type = "train")
+test_samp <- df_all %>% filter(ID2==2) %>% mutate(maxJ = max(J)) %>% filter(J > 0.75*maxJ) %>% dplyr::select(signal_lw, t) %>% mutate(
+      lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
+    ) %>% filter(!is.na(lag_signal)) %>% mutate(type = "test")
+
+#bind_rows(train_samp, test_samp) %>% ggplot(aes(x = lag_signal, y = signal_lw))+geom_density_2d_filled(contour_var="ndensity")+
+ # facet_wrap(.~type)
+bind_rows(train_samp, test_samp) %>% ggplot(aes(x = lag_signal, y = signal_lw))+stat_density_2d(geom = "raster", aes(fill = after_stat(ndensity)), contour=F)+scale_fill_viridis_c(name = "Density")+
+  facet_wrap(.~type)+labs(x = "Lag Signal", y = "Signal", title = "Training and Testing Data for Subject 2", subtitle = "Lag 15sec")
+
+test_samp <- df_all %>% filter(ID2==3) %>% mutate(maxJ = max(J)) %>% filter(J > 0.75*maxJ) %>% dplyr::select(signal_lw, t) %>% mutate(
+      lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
+    ) %>% filter(!is.na(lag_signal)) %>% mutate(type = "test")
+
+bind_rows(train_samp, test_samp) %>% ggplot(aes(x = lag_signal, y = signal_lw))+stat_density_2d(geom = "raster", aes(fill = after_stat(ndensity)), contour=F)+scale_fill_viridis_c(name = "Density")+
+  facet_wrap(.~type)+labs(x = "Lag Signal", y = "Signal", title = "Training Data for Subject 2, Testing Data for Subject 3",
+                          subtitle = "Lag 15sec")
+```
+
+
+We could represent these images as matrices, where entry $x_{ij} = \text{density or number of points}$ where signal is in interval $i$ and lag signal is in interval $j$. Using intervals of 0.25 $m/s^2$, this would result in a 12x12 matrix for each a given lag. For example, the matrix for subject 2, training data, lag 0.15 second is below: 
+
+
+```{r}
+## below is matrix representation of the image 
+ testing <- data_train %>% filter(ID==2) %>% dplyr::select(1:146) %>% dplyr::select(-c(ID)) %>% summarize(across(1:144, sum)) %>% pivot_longer(cols = 1:144) %>% rowwise() %>% mutate(x = str_split(name, " ")[[1]][1], y = str_split(name, " ")[[1]][2]) %>% dplyr::select(-name) %>% pivot_wider(names_from = y, values_from = value, id_cols = x) %>% dplyr::select(-x)
+testing 
+```
+
+
+We scale by the number of points to make the result easy to compare for different lags: 
+
+```{r,eval=F} 
+scaled <- testing/sum(rowSums(as.matrix(testing))); scaled
+``` 
+
+For each subject, we can calculate the matrix of the image for all of the lags, in the training and the testing data, then we can compute the squared Frobenius distance between all combinations of training and testing data. 
+
+```{r}
+
+get_images <- function(subject, lags, data){
+  get_image_onelag <- function(lag, subject, data){
+    image <- data %>% filter(ID==subject) %>% dplyr::select(contains(lag)) %>% summarize(across(1:144, sum)) %>% pivot_longer(cols = 1:144) %>% rowwise() %>% mutate(x = str_split(name, " ")[[1]][1], y = str_split(name, " ")[[1]][2]) %>% dplyr::select(-name) %>% pivot_wider(names_from = y, values_from = value, id_cols = x) %>% dplyr::select(-x)
+    return(image/sum(rowSums(as.matrix(image))))
+    }
+  return(map_dfr(.x = lags, .f = get_image_onelag, subject=subject, data=data))
+  
+}
+lags <- c(" 15", " 30", " 45", " 60", " 75", " 90")
+all_images_training <- map(.x = subjects, lags = lags, data = data_train, .f = get_images)
+all_images_testing <- map(.x = subjects, lags = lags, data = data_test, .f = get_images)
+train <- rep(seq(1,32,1), each=32)
+test <- rep(seq(1,32,1), 32)
+
+calculate_frob_distance <- function(subject_train, subject_test, list_train, list_test){
+  train_mat <- as.matrix(list_train[[subject_train]])
+  test_mat <- as.matrix(list_test[[subject_test]])
+  SMFilter::FDist2(train_mat, test_mat)
+}
+
+distances_frob <- map2_dbl(.x = train, .y = test,
+                          list_train = all_images_training, list_test = all_images_testing,
+                          .f = calculate_frob_distance)
+
+distances_fmat <- matrix(distances_frob, nrow=32)
+distances_df <- distances_fmat %>% data.frame() 
+colnames(distances_df) <- seq(1,32,1)
+distances_df <- distances_df %>% mutate(test_subj = seq(1,32,1))
+
+long <- distances_df %>% pivot_longer(cols = -test_subj) %>% mutate(name = as.numeric(name)) 
+
+ggplot(long, aes(x=test_subj, y =name, fill = value))+
+  geom_tile()+scale_fill_viridis_c(name = "Frobenius Distance", option="magma")+scale_x_continuous(breaks=seq(1,32,1))+
+  scale_y_continuous(breaks=seq(1,32,1))+labs(x = "Test Data Subject", y = "Training Data Subject",
+                                              title = "Distances between Training and Testing Data for Each Subject", subtitle = "")+
+  geom_tile(data = long %>% filter(test_subj==name), fill = NA, color = "white", linewidth=.5)
+# keep playing w this 
+
+```
+
+### Comparing "Distances" and Predictive Performance 
+
+We can look at which subjects are the best predicted: 
+
+```{r}
+differences <- all_predictions %>%  group_by(true_subject, model) %>% summarize(mean_pred = mean(pred)) %>%  
+    group_by(true_subject) %>% summarize(
+      maxprob = max(mean_pred),
+      prediction = model[mean_pred==maxprob], # which subject has highest predicted probability 
+      probsubj = mean_pred[true_subject==model],
+      second_largest_prob = mean_pred[rank(-mean_pred, ties.method="average")==2],
+      diff = maxprob - second_largest_prob,
+      avgdiff = maxprob - mean(mean_pred[mean_pred!=maxprob])
+      # which probability comes from the "true" model 
+    ) %>% mutate(
+      correct = ifelse(as.numeric(prediction)==true_subject, 1, 0)
+    ) %>% dplyr::select(true_subject, diff, avgdiff, correct)
+
+prob_matrix <- all_predictions %>%  group_by(true_subject, model) %>% summarize(mean_pred = mean(pred)) %>% group_by(true_subject) %>%
+  mutate(
+    maxprob = max(mean_pred),
+    prediction = model[mean_pred==maxprob],
+    correct = ifelse(prediction==true_subject, 1, 0)
+  )
+ggplot(prob_matrix, aes(x = true_subject, y = model, fill = mean_pred))+geom_tile()+
+  scale_fill_viridis_c(name = "Predicted Probability", option="inferno")+scale_x_continuous(breaks=seq(1,32,1))+
+  scale_y_continuous(breaks=seq(1,32,1))+labs(x = "True Subject", y = "Test Subject", 
+                                              title = "Predicted Probabilities", subtitle = "")+
+  geom_tile(data = prob_matrix %>% filter(mean_pred==maxprob), fill = NA, color = "white", linewidth=.5)
+
+```
+
+For each subject, we can also look at the difference between the correct probability and the second highest probability: 
+
+```{r}
+differences <- all_predictions %>%  group_by(true_subject, model) %>% summarize(mean_pred = mean(pred)) %>%  
+    group_by(true_subject) %>% summarize(
+      maxprob = max(mean_pred),
+      prediction = model[mean_pred==maxprob], # which subject has highest predicted probability 
+      probsubj = mean_pred[true_subject==model],
+      second_largest_prob = mean_pred[rank(-mean_pred, ties.method="average")==2],
+      diff = maxprob - second_largest_prob,
+      avgdiff = maxprob - mean(mean_pred[mean_pred!=maxprob])
+      # which probability comes from the "true" model 
+    ) %>% mutate(
+      correct = ifelse(as.numeric(prediction)==true_subject, 1, 0)
+    ) %>% dplyr::select(true_subject, diff, avgdiff, correct)
+tab1 <- differences %>% dplyr::select(true_subject, diff, avgdiff) %>% arrange(desc(diff)) %>% slice(1:16) %>% gt() %>%
+  tab_header(title = "Prediction Summary") %>% cols_label(true_subject = "Subject",
+                                                          diff = "Dist Next Highest Prob", avgdiff = "Dist Mean Other Probs") %>% fmt_number(columns  = 2:3, decimals=2)
+
+tab2 <- differences %>% dplyr::select(true_subject, diff, avgdiff) %>% arrange(desc(diff)) %>% slice(17:32) %>% gt() %>%
+  tab_header(title = "Prediction Summary") %>% cols_label(true_subject = "Subject",
+                                                          diff = "Dist Next Highest Prob", avgdiff = "Dist Mean Other Probs") %>% fmt_number(columns  = 2:3, decimals=2)
+gtExtras::gt_two_column_layout(list(tab1, tab2), vwidth=250)
+```
+
+
+```{r, eval=F}
+get_grids <- function(subject, n_predictors, train, test, threshold){
+  # first filter to grids above threshold 
+  grids <- train %>% filter(ID==subject) %>% pivot_longer(cols = -ID) %>% 
+    mutate(lag = sub("^.+] ", "", name)) %>% group_by(name, lag) %>% 
+    summarize(value = sum(value)) %>% group_by(lag) %>% mutate(
+      group_sum = sum(value)
+    ) %>% ungroup() %>% mutate(
+      pct = value/group_sum
+    ) %>% filter(pct >= threshold) %>% dplyr::select(name)  %>% unlist() %>% unname()
+  # make outcome binary 
+  train$class <- ifelse(train$ID==subject, 1, 0)
+  # with the training data, fit a logistic regression with each predictor individually and get p-value 
+  # select __ lowest p values based on n_predictors input 
+  imp_grids <- train %>% dplyr::select(all_of(grids)) %>%
+    map(~glm(train$class ~.x, data = train, family = binomial(link="logit"))) %>%
+    map(summary.glm) %>% map(c("coefficients")) %>% map_dbl(8) %>% as.data.frame() %>% rename("pval" = ".") %>% slice_min(pval, n=n_predictors) %>% rownames()
+  grid_df <- train %>% dplyr::select(c(ID, all_of(imp_grids))) %>% summarize(across(starts_with("("), mean)) %>% mutate(
+    ID = subject
+  ) %>% pivot_longer(cols = -ID) %>% rename("grid" = name, "avg" = value)
+return(grid_df)
+}
+
+grids <- map_dfr(.x = subjects, .f = get_grids, n_predictors = 10, train= data_train, test = data_test, threshold = 0.001)
+
+selected_grids <- grids %>% group_by(grid) %>% count() %>% arrange(desc(n)) %>% filter(n>=4) %>% dplyr::select(grid) %>% unlist() %>% unname()
+
+data_train %>% dplyr::select(c(ID, all_of(selected_grids))) %>% group_by(ID) %>% summarize(across(starts_with("("), sum)) %>% pivot_longer(cols=-ID) %>% rename(
+  "grid" = name, 
+  "count"=value
+) %>% ggplot(aes(x = as.factor(grid), y = ID, fill = count))+geom_tile()+scale_fill_viridis()+
+      theme(axis.text.x = element_text(angle = 90))+scale_y_continuous(breaks=seq(1,32,1))
+```
+
+
+
+```{r, eval=F}
+
+
+train_sub1 <- data_train %>% filter(ID==1) %>% dplyr::select(-ID) %>% mutate(across(1:864, ~ifelse(.x>0, 1, 0))) %>% as.matrix()
+test_sub1 <- data_test %>% filter(ID==1) %>% dplyr::select(-ID) %>% mutate(across(1:864, ~ifelse(.x>0, 1, 0))) %>% as.matrix()
+test_sub2 <- data_test %>% dplyr::filter(ID==2) %>% dplyr::select(-ID) %>% mutate(across(1:864, ~ifelse(.x>0, 1, 0))) %>% as.matrix()
+
+mean(gsignal::wconv(type = "2d", test_sub1, train_sub1, shape = "same"))
+mean(gsignal::wconv(type = "2d", test_sub2, train_sub1, shape = "same"))
+
+test_sub2 <- data_test %>% dplyr::filter(ID==2) %>% dplyr::select(-ID) %>% as.matrix()
+test_sub4 <- data_test %>% dplyr::filter(ID==3) %>% dplyr::select(-ID) %>% as.matrix()
+result <- gsignal::wconv(type = "2d", train_sub1, test_sub1, shape = "same")
+result <- gsignal::wconv(type = "2d", test_sub1, train_sub1, shape = "same")
+result2 <- gsignal::wconv(type = "2d", test_sub2, train_sub1, shape = "same")
+
+resultC <- gsignal::wconv(type = "column", train_sub1, test_sub1)
+result2 <-gsignal::wconv(type = "2d", train_sub1, test_sub2, shape = "same")
+result4 <-gsignal::wconv(type = "2d", train_sub1, test_sub4, shape = "same")
+
+# OpenImageR::convlution(train_sub1, test_sub1, mode = "same")
+norm(result, type = "F"); norm(result2, type="F"); norm(result4, type="F")
+mean(result); mean(result2); mean(result4)
+
+
 ```
 
