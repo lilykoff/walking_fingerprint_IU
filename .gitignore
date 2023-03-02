@@ -6,3 +6,6 @@ all_data.csv
 df_all.csv
 Fingerprinting-Vignette_cache
 Fingerprinting-Vignette_files
+Distance Metrics.Rmd
+Distance-Metrics.html
+Distance-metrics_cache/
