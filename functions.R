@@ -6,33 +6,43 @@ library(gt)
 options(dplyr.summarise.inform = FALSE)
 `%notin%` <- Negate(`%in%`)
 
+map_dfr_progress <- function(.x, .f, ..., .id = NULL) {
+  .f <- purrr::as_mapper(.f, ...)
+  pb <- progress::progress_bar$new(total = length(.x), force = TRUE)
+  
+  f <- function(...) {
+    pb$tick()
+    .f(...)
+  }
+  purrr::map_dfr(.x, f, ..., .id = .id)
+}
 
 get_grid_data  <- function(subject, time_lags, gcell_size, location, data){
-  df <- data %>% dplyr::select(ID2, paste("signal_", location, sep = ""), t, J) %>% 
+  df <- data %>% dplyr::select(ID2, paste("signal_", location, sep = ""), J_new) %>% 
     rename("signal" = paste("signal_", location, sep = ""),
            "ID" = ID2)
   # max_signal <- round(max(df$signal), 0) 
   # to replicate our data we set to 3 
   max_signal <- 3
   tmp <- df %>% filter(ID == subject) # filter to subject 
-  n <- max(tmp$J) # number of total seconds for that subject 
-  seconds <- rep(seq(1, n, 1), each=length(time_lags)) # vector of seconds and lags so that we can iterate over both
-  lags <- rep(time_lags, n) # vector of lags 
+  n_seconds <- max(tmp$J_new) # number of total seconds for that subject 
+  seconds <- rep(seq(1, n_seconds, 1), each=length(time_lags)) # vector of seconds and lags so that we can iterate over both
+  lags <- rep(time_lags, n_seconds) # vector of lags 
   get_grid_data_onesubj <- function(second, lag){
     # function that gets number of points in each "grid cell" for a given second and given lag 
-    tmp %>% filter(J==second) %>% dplyr::select(signal, t) %>% mutate(
+    tmp %>% filter(J_new==second) %>% dplyr::select(signal) %>% mutate(
       lag_signal = lag(signal, n = lag)  # for each second, calculate signal and lagged signal 
-    ) %>% filter(!is.na(lag_signal)) %>% mutate(cut_sig = cut(signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T),
-                                                cut_lagsig = cut(lag_signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T)) %>% 
+    ) %>% mutate(cut_sig = cut(signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T),
+                 cut_lagsig = cut(lag_signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T)) %>% 
       drop_na() %>% # count # points in each "grid cell" 
       count(cut_sig, cut_lagsig, .drop=FALSE) %>% mutate(lag_hz = lag, ID = subject, J = second, cell = paste(cut_sig, cut_lagsig, lag_hz)) %>%
-      dplyr::select(n, ID, J, cell) 
+      dplyr::select(n, ID, J, cell)
   }
   # apply above function over all seconds and lags, return df
   map2_dfr(.x = seconds, .y = lags, 
            .f = get_grid_data_onesubj) %>% pivot_wider(id_cols = c(ID, J), names_from = cell, values_from = n) # apply across all seconds and lags 
-  
 }
+
 
 fit_model <- function(subject, n_predictors, train, test, threshold){
   # first filter to grids above threshold 
@@ -66,6 +76,40 @@ fit_model <- function(subject, n_predictors, train, test, threshold){
   pred <- predict.glm(mod, newdata = tmp_test, type = "response")
   # return data frame with predictions, model, and subject 
   return(cbind(pred, rep(subject, length(pred)), test$ID) %>% data.frame() %>% rename("model" = "V2", "true_subject" = "V3"))
+}
+
+extract_models <- function(subject, n_predictors, train, test, threshold){
+  # first filter to grids above threshold 
+  grids <- train %>% filter(ID==subject) %>% pivot_longer(cols = -ID) %>% 
+    mutate(lag = sub("^.+] ", "", name)) %>% group_by(name, lag) %>% 
+    summarize(value = sum(value)) %>% group_by(lag) %>% mutate(
+      group_sum = sum(value)
+    ) %>% ungroup() %>% mutate(
+      pct = value/group_sum
+    ) %>% filter(pct >= threshold) %>% dplyr::select(name)  %>% unlist() %>% unname()
+  # make outcome binary 
+  train$class <- ifelse(train$ID==subject, 1, 0)
+  test$class <- ifelse(test$ID==subject, 1, 0)
+  # with the training data, fit a logistic regression with each predictor individually and get p-value 
+  # select __ lowest p values based on n_predictors input 
+  # if we want to use all predictors, then we set n_predictors=Inf
+  if(!is.infinite(n_predictors)){
+    imp_grids <- train %>% dplyr::select(all_of(grids)) %>%
+      map(~glm(train$class ~.x, data = train, family = binomial(link="logit"))) %>%
+      map(summary.glm) %>% map(c("coefficients")) %>% map_dbl(8) %>% as.data.frame() %>% rename("pval" = ".") %>% slice_min(pval, n=n_predictors) %>% rownames()
+  }
+  else{
+    imp_grids <- grids
+  }
+  # select important grids from train and test data 
+  tmp <- train %>% dplyr::select(c(class, all_of(imp_grids))) 
+  tmp_test <- test %>% dplyr::select(all_of(imp_grids))
+  # fit logistic regression 
+  mod <- glm(class ~ ., data = tmp, family=binomial(link="logit"))
+  # extract predictors
+  pred <- predict.glm(mod, newdata = tmp_test, type = "response")
+  # return data frame with predictions, model, and subject 
+  return(mod)
 }
 
 summarize_preds <- function(all_predictions){
@@ -111,7 +155,7 @@ plot_preds <- function(all_predictions, title=NULL){
   else{g + ggtitle(paste(title))}
 }
 
-# funtction to run all of the above in one line 
+# function to run all of the above in one line 
 pipeline <- function(data, location, training_pct, time_lags, gcell_size, threshold, n_predictors){
   # get vector of subjects 
   subjects <- data %>% dplyr::select(ID2) %>% distinct() %>% unlist()
