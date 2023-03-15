@@ -8,7 +8,7 @@ This repository contains code to
 
 File Description
 
--   dataprocess.R
+-   dataprocessing.R
 
     -   Read in raw data, combine into one csv, filter to just walking
 
@@ -19,3 +19,11 @@ File Description
 -   pipeline.R
 
     -   Pipeline to fit models and return results
+
+-   sensitivity_analysis.R
+
+    -   Several sensitivity analyses and results
+
+-   Fingerprinting Vignette.Rmd
+
+    -   Description of study and illustration of data and process

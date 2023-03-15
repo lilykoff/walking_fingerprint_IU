@@ -30,49 +30,51 @@ get_density <- function(x, y, ...) {
 ```
 
 ```{r read in data}
-df_all <- read.csv("df_all.csv")[,-1]
+df_all <- read_csv("df_all.csv")[,-1]
 all_data <- read_csv("all_data.csv")[,-1]
 ```
 
 ```{r functions}
+map_dfr_progress <- function(.x, .f, ..., .id = NULL) {
+  .f <- purrr::as_mapper(.f, ...)
+  pb <- progress::progress_bar$new(total = length(.x), force = TRUE)
+  
+  f <- function(...) {
+    pb$tick()
+    .f(...)
+  }
+  purrr::map_dfr(.x, f, ..., .id = .id)
+}
 
-
-# function to transform time series into predictors for one subject 
-get_grid_data  <- function(subject, time_lags, gcell_size, location, sessions, data){
-  df <- data %>% filter(loc==location & session %in% sessions) # filter data to location and session of interest
-  max_signal <- round(max(df$signal), 0) # get max signal for all subjects
-  tmp <- df %>% filter(ID == subject) # filter to subject 
-  n <- max(tmp$J) # number of total seconds for that subject 
-  seconds <- rep(seq(1, n, 1), each=length(time_lags)) # vector of seconds and lags so that we can iterate over both
-  lags <- rep(time_lags, n) # vector of lags 
-  get_grid_data_onesubj <- function(second, lag){
-    # function that gets number of points in each "grid cell" for a given second and given lag 
-    tmp %>% filter(J==second) %>% dplyr::select(signal, t) %>% mutate(
-      lag_signal = lag(signal, n = lag)  # for each second, calculate signal and lagged signal 
-    ) %>% filter(!is.na(lag_signal)) %>% mutate(cut_sig = cut(signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T),
-                                                cut_lagsig = cut(lag_signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T)) %>% 
+get_grid_data  <- function(subject, time_lags, gcell_size, location, data){
+  # function to get grid cell data from one subject 
+  # select ID, signal, time (seconds), filter to subject 
+  df <- data %>% dplyr::select(ID2, paste("signal_", location, sep = ""), J) %>% 
+    rename(signal = paste("signal_", location, sep = ""),
+           ID = ID2) %>% filter(ID==subject)
+  # max_signal <- round(max(df$signal), 0) 
+  max_signal <- 3  # we set max signal to 3 based on EDA, but could take actual max signal 
+  n_seconds <- max(df$J) # number of total seconds for the subject 
+  seconds <- rep(seq(1, n_seconds, 1), each=length(time_lags)) # vector of seconds and lags so that we can iterate over both
+  lags <- rep(time_lags, n_seconds) # vector of lags 
+  # function to get the grid data for one second, one lag 
+  get_grid_data_lagsec <- function(second, lag){
+    # filter to one second 
+    df %>% filter(J==second) %>% dplyr::select(signal) %>% mutate(
+      lag_signal = lag(signal, n = lag)) %>%   # for each second, calculate signal and lagged signal 
+      mutate(cut_sig = cut(signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T),
+                 cut_lagsig = cut(lag_signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T)) %>% 
       drop_na() %>% # count # points in each "grid cell" 
       count(cut_sig, cut_lagsig, .drop=FALSE) %>% mutate(lag_hz = lag, ID = subject, J = second, cell = paste(cut_sig, cut_lagsig, lag_hz)) %>%
-      dplyr::select(n, ID, J, cell) 
+      dplyr::select(n, ID, J, cell)
   }
   # apply above function over all seconds and lags, return df
   map2_dfr(.x = seconds, .y = lags, 
-           .f = get_grid_data_onesubj) %>% pivot_wider(id_cols = c(ID, J), names_from = cell, values_from = n) # apply across all seconds and lags 
-  
+           .f = get_grid_data_lagsec) %>% pivot_wider(id_cols = c(ID, J), names_from = cell, values_from = n) 
+  # apply across all seconds and lags 
 }
 
-# function to get candidate predictors - based on threshold for one subject 
-get_grids <- function(subject, threshold, training_data){
-  training_data %>% filter(ID==subject) %>% pivot_longer(cols = -ID) %>% 
-    mutate(lag = sub("^.+] ", "", name)) %>% group_by(name, lag) %>% 
-    summarize(value = sum(value)) %>% group_by(lag) %>% mutate(
-      group_sum = sum(value) # calculate number of points across one lag, all seconds
-    ) %>% ungroup() %>% mutate(
-      pct = value/group_sum # calculate pct of observations in each cell 
-    ) %>% filter(pct >= threshold) %>% dplyr::select(name)  %>% unlist() %>% unname() # filter 
-}
 
-# function to fit models with n predictors each 
 fit_model <- function(subject, n_predictors, train, test, threshold){
   # first filter to grids above threshold 
   grids <- train %>% filter(ID==subject) %>% pivot_longer(cols = -ID) %>% 
@@ -87,9 +89,15 @@ fit_model <- function(subject, n_predictors, train, test, threshold){
   test$class <- ifelse(test$ID==subject, 1, 0)
   # with the training data, fit a logistic regression with each predictor individually and get p-value 
   # select __ lowest p values based on n_predictors input 
-  imp_grids <- train %>% dplyr::select(all_of(grids)) %>%
-    map(~glm(train$class ~.x, data = train, family = binomial(link="logit"))) %>%
-    map(summary.glm) %>% map(c("coefficients")) %>% map_dbl(8) %>% as.data.frame() %>% rename("pval" = ".") %>% slice_min(pval, n=n_predictors) %>% rownames()
+  # if we want to use all predictors, then we set n_predictors=Inf
+  if(!is.infinite(n_predictors)){
+    imp_grids <- train %>% dplyr::select(all_of(grids)) %>%
+      map(~glm(train$class ~.x, data = train, family = binomial(link="logit"))) %>%
+      map(summary.glm) %>% map(c("coefficients")) %>% map_dbl(8) %>% as.data.frame() %>% rename(pval = ".") %>% slice_min(pval, n=n_predictors) %>% rownames()
+  }
+  else{
+    imp_grids <- grids
+  }
   # select important grids from train and test data 
   tmp <- train %>% dplyr::select(c(class, all_of(imp_grids))) 
   tmp_test <- test %>% dplyr::select(all_of(imp_grids))
@@ -98,24 +106,55 @@ fit_model <- function(subject, n_predictors, train, test, threshold){
   # extract predictors
   pred <- predict.glm(mod, newdata = tmp_test, type = "response")
   # return data frame with predictions, model, and subject 
-  return(cbind(pred, rep(subject, length(pred)), test$ID) %>% data.frame() %>% rename("model" = "V2", "true_subject" = "V3"))
+  return(cbind(pred, rep(subject, length(pred)), test$ID) %>% data.frame() %>% rename(model = V2, true_subject = V3))
 }
 
-# functions to summarize and plot results 
-# input: data frame of predictions from fit_model 
-# output: summary of incorrect subjects (table) and prediction accuracy 
+extract_models <- function(subject, n_predictors, train, test, threshold){
+  # first filter to grids above threshold 
+  grids <- train %>% filter(ID==subject) %>% pivot_longer(cols = -ID) %>% 
+    mutate(lag = sub("^.+] ", "", name)) %>% group_by(name, lag) %>% 
+    summarize(value = sum(value)) %>% group_by(lag) %>% mutate(
+      group_sum = sum(value)
+    ) %>% ungroup() %>% mutate(
+      pct = value/group_sum
+    ) %>% filter(pct >= threshold) %>% dplyr::select(name)  %>% unlist() %>% unname()
+  # make outcome binary 
+  train$class <- ifelse(train$ID==subject, 1, 0)
+  test$class <- ifelse(test$ID==subject, 1, 0)
+  # with the training data, fit a logistic regression with each predictor individually and get p-value 
+  # select __ lowest p values based on n_predictors input 
+  # if we want to use all predictors, then we set n_predictors=Inf
+  if(!is.infinite(n_predictors)){
+    imp_grids <- train %>% dplyr::select(all_of(grids)) %>%
+      map(~glm(train$class ~.x, data = train, family = binomial(link="logit"))) %>%
+      map(summary.glm) %>% map(c("coefficients")) %>% map_dbl(8) %>% as.data.frame() %>% rename(pval = ".") %>% slice_min(pval, n=n_predictors) %>% rownames()
+  }
+  else{
+    imp_grids <- grids
+  }
+  # select important grids from train and test data 
+  tmp <- train %>% dplyr::select(c(class, all_of(imp_grids))) 
+  tmp_test <- test %>% dplyr::select(all_of(imp_grids))
+  # fit logistic regression 
+  mod <- glm(class ~ ., data = tmp, family=binomial(link="logit"))
+  # extract predictors
+  pred <- predict.glm(mod, newdata = tmp_test, type = "response")
+  # return data frame with predictions, model, and subject 
+  return(mod)
+}
+
 summarize_preds <- function(all_predictions){
   # group by the true subject and the model
   # for example, predictions from model k, row j is prob(row of j data is from subject k)
   # get the mean predicted probabilities and see if highest predicted prob is "correct" 
   df <- all_predictions %>% group_by(true_subject, model) %>% summarize(mean_pred = mean(pred)) %>% 
     group_by(true_subject) %>% summarize(
-    maxprob = max(mean_pred),
-    prediction = model[mean_pred==maxprob], # which subject has highest predicted probability 
-    probsubj = mean_pred[true_subject==model] # which probability comes from the "true" model 
-  ) %>% mutate(
-    correct = ifelse(as.numeric(prediction)==true_subject, 1, 0)
-  ) 
+      maxprob = max(mean_pred),
+      prediction = model[mean_pred==maxprob], # which subject has highest predicted probability 
+      probsubj = mean_pred[true_subject==model] # which probability comes from the "true" model 
+    ) %>% mutate(
+      correct = ifelse(as.numeric(prediction)==true_subject, 1, 0)
+    ) 
   df %>% filter(correct==0) %>% dplyr::select(-correct) %>% gt() %>% 
     tab_header(title = "Incorrect Subjects Summary",
                subtitle = paste("Correct prediction rate: ", round(sum(df$correct)/nrow(df), 2))) %>%
@@ -147,14 +186,13 @@ plot_preds <- function(all_predictions, title=NULL){
   else{g + ggtitle(paste(title))}
 }
 
-# function to do all of the above process for session, location, training %, time lag, threshold, num preds 
-
-pipeline <- function(data, sessions, location, training_pct, time_lags, gcell_size, threshold, n_predictors){
+# function to run all of the above in one line 
+pipeline <- function(data, location, training_pct, time_lags, gcell_size, threshold, n_predictors){
   # get vector of subjects 
-  subjects <- data %>% filter(session %in% sessions, loc==location) %>% dplyr::select(ID) %>% distinct() %>% unlist()
-# get grid data (predictors)  
+  subjects <- data %>% dplyr::select(ID2) %>% distinct() %>% unlist()
+  # get grid data (predictors)  
   data_all <- map_dfr(subjects, get_grid_data,
-    time_lags = time_lags, gcell_size = gcell_size, location=location, session=sessions, data=data)
+                      time_lags = time_lags, gcell_size = gcell_size, location=location, data=data)
   # get training and testing data based on pct supplied 
   data_train <- data_all %>% group_by(ID) %>% 
     mutate( maxJ = max(J)) %>% filter(J <= maxJ*training_pct) %>% dplyr::select(-c(J, maxJ)) %>% ungroup()
@@ -196,51 +234,59 @@ get_roc <- function(all_predictions, individual = F){
 
 
 
-
 ```
-
 
 ### Data Summary
 
 For each subject, gait acceleration series measured simultaneously at the right wrist, left hip, right ankle, and left ankle. The data are collected at 100 Hz.
 
 ```{r data summary}
-df_all %>% group_by(ID2) %>% summarize(
+tab1 <- df_all %>% group_by(ID2) %>% summarize(
  seconds = max(J),
- mins = round(seconds/60, 2)) %>% gt() %>% tab_header(title= "Summary of Times by Session and Recording") %>% 
-  cols_label(ID2 = "Subject", seconds = "Number Seconds", mins = "Minutes")
+ mins = round(seconds/60, 2)) %>% slice(1:16) %>% gt() %>% tab_header(title= "Summary of Times by Session and Recording") %>% 
+  cols_label(ID2 = "Subject", seconds = "Number Seconds", mins = "Minutes") 
+tab2 <- df_all %>% group_by(ID2) %>% summarize(
+ seconds = max(J),
+ mins = round(seconds/60, 2)) %>% slice(17:32) %>% gt() %>% tab_header(title= "Summary of Times by Session and Recording") %>% 
+  cols_label(ID2 = "Subject", seconds = "Number Seconds", mins = "Minutes") 
+gtExtras::gt_two_column_layout(list(tab1, tab2), vwidth=250)
+
+
 ```
 
-We see that we have between approximately 9 and 13 minutes of data for each individual.  
+\vspace{.3 in}
+
+We see that we have between approximately 9 and 13 minutes of data for each individual.
 
 ### Data Visualization
 
-We look at the raw times series for a subject, and also the lag 15 second densities. 
+We look at the raw times series for a subject, and also the lag 15 second densities.
 
 ```{r data vis}
 # we want to visualize a few subjects
 
-df_all %>% filter(ID2==1&J<=5) %>% dplyr::select(ID2, t, signal_lw, signal_lh, signal_ra, signal_la) %>% pivot_longer(cols = 3:6) %>%
-  ggplot(aes(x = t/100, y = value, col = name))+geom_line()+labs(
+df_all %>% filter(ID2==1&J<=5) %>% dplyr::select(ID2, time_s_2, signal_lw, signal_lh, signal_ra, signal_la) %>% pivot_longer(cols = 3:6) %>%
+  ggplot(aes(x = time_s_2, y = value, col = name))+geom_line()+labs(
   x = "Time (sec)", y = "Acceleration (g)", title = "5 Seconds of Data from Various Locations",
   subtitle= "Subject 1"
 )+scale_x_continuous(breaks=seq(0, 5,1))+scale_colour_viridis_d(name = "Location", labels = c("L. Ankle", "L. Hip", "L. Wrist", "R. Ankle"))
 
-df_all %>% filter(ID2==1&J<=5) %>% dplyr::select(ID2, t, signal_lw, signal_lh, signal_ra, signal_la) %>% pivot_longer(cols = 3:6) %>%
-  ggplot(aes(x = t/100, y = value, col = name))+geom_line()+labs(
+df_all %>% filter(ID2==1&J<=5) %>% dplyr::select(ID2, time_s_2, signal_lw, signal_lh, signal_ra, signal_la) %>% pivot_longer(cols = 3:6) %>%
+  ggplot(aes(x = time_s_2/100, y = value, col = name))+geom_line()+labs(
   x = "Time (sec)", y = "Acceleration (m/s^2)", title = "5 Seconds of Data from Various Locations",
   subtitle= "Subject 1"
 )+scale_x_continuous(breaks=seq(0, 5,1))+facet_wrap(.~name)+scale_color_viridis_d()+theme(legend.position="none")
 
 
-df_all %>% filter((ID2==1|ID2==2)&J<=5) %>% dplyr::select(ID2, t, signal_lw) %>%
-  ggplot(aes(x = t/100, y = signal_lw, col = factor(ID2)))+geom_line()+labs(
+df_all %>% filter((ID2==1|ID2==2)&J<=5) %>% dplyr::select(ID2, time_s_2, signal_lw) %>%
+  ggplot(aes(x = time_s_2/100, y = signal_lw, col = factor(ID2)))+geom_line()+labs(
   x = "Time (sec)", y = "Acceleration (m/s^2)", title = "5 Seconds of Data", subtitle = "Left Wrist")+scale_x_continuous(breaks=seq(0, 5,1))+scale_color_viridis_d(name = "Subject")
 
 
 ```
+
 ```{r plot densities }
-dens <- df_all %>% filter(ID2==1) %>% dplyr::select(signal_lw, t) %>% mutate(
+dens <- df_all %>% filter(ID2==1) %>% dplyr::select(signal_lw, time_s_2) %>% mutate(
       lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
     ) %>% filter(!is.na(lag_signal))
 dens$density <- get_density(dens$signal_lw, dens$lag_signal, n = 100)
@@ -248,7 +294,7 @@ dens$density <- get_density(dens$signal_lw, dens$lag_signal, n = 100)
 lw <- ggplot(dens, aes(x = signal_lw, y  = lag_signal, color = density))+geom_point()+scale_color_viridis(name = "Density")+
   labs( x = "Signal (m/s2)", y = "Lag Signal (m/s2)", title = "Densities Subject 1, Left Wrist, Lag = 0.15s")
 
-dens <- df_all %>% filter(ID2==1) %>% dplyr::select(signal_la, t) %>% mutate(
+dens <- df_all %>% filter(ID2==1) %>% dplyr::select(signal_la, time_s_2) %>% mutate(
       lag_signal = lag(signal_la, n = 15)  # for each second, calculate signal and lagged signal 
     ) %>% filter(!is.na(lag_signal))
 dens$density <- get_density(dens$signal_la, dens$lag_signal, n = 100)
@@ -258,7 +304,7 @@ la <- ggplot(dens, aes(x = signal_la, y  = lag_signal, color = density))+geom_po
 grid.arrange(lw, la)
 
 # subject 2
-dens <- df_all %>% filter(ID2==2) %>% dplyr::select(signal_lw, t) %>% mutate(
+dens <- df_all %>% filter(ID2==2) %>% dplyr::select(signal_lw, time_s_2) %>% mutate(
       lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
     ) %>% filter(!is.na(lag_signal))
 dens$density <- get_density(dens$signal_lw, dens$lag_signal, n = 100)
@@ -266,7 +312,7 @@ dens$density <- get_density(dens$signal_lw, dens$lag_signal, n = 100)
 lw <- ggplot(dens, aes(x = signal_lw, y  = lag_signal, color = density))+geom_point()+scale_color_viridis(name = "Density")+
   labs( x = "Signal (m/s2)", y = "Lag Signal (m/s2)", title = "Densities Subject 2, Left Wrist, Lag = 0.15s")
 
-dens <- df_all %>% filter(ID2==2) %>% dplyr::select(signal_la, t) %>% mutate(
+dens <- df_all %>% filter(ID2==2) %>% dplyr::select(signal_la, time_s_2) %>% mutate(
       lag_signal = lag(signal_la, n = 15)  # for each second, calculate signal and lagged signal 
     ) %>% filter(!is.na(lag_signal))
 dens$density <- get_density(dens$signal_la, dens$lag_signal, n = 100)
@@ -276,19 +322,17 @@ la <- ggplot(dens, aes(x = signal_la, y  = lag_signal, color = density))+geom_po
 grid.arrange(lw, la)
 ```
 
-### Model Fitting 
+### Model Fitting
 
-We calculate the grid cell predictors using time lags of 0.15, 0.30, 0.45, 0.60, 0.75, and 0.90 seconds and grid cell size of 0.25 m/s2. We split the data into 75\% training and 25\% testing. We filter the training data to the grid cells with at least 0.1\% of the data; we use these grid cells as predictors in a logistic regression. We use one vs. rest logistic regression to obtain predicted probabilities for each subject on the testing data. Then we calculate the average probability for each subject and determine whether the model has identified the correct individual. Finally, we plot the predicted probabilities, calculate the overall AUC, and plot each individual AUC curve. 
+We calculate the grid cell predictors using time lags of 0.15, 0.30, 0.45, 0.60, 0.75, and 0.90 seconds and grid cell size of 0.25 m/s2. We split the data into 50% training and 50% testing. We filter the training data to the grid cells with at least 0.1% of the data; we use these grid cells as predictors in a logistic regression. We use one vs. rest logistic regression to obtain predicted probabilities for each subject on the testing data. Then we calculate the average probability for each subject and determine whether the model has identified the correct individual. Finally, we plot the predicted probabilities, calculate the overall AUC, and plot each individual AUC curve.
 
 ```{r model fitting}
-training_pct <- 0.75 
+training_pct <- 0.50 
 threshold <- 0.001
 n_predictors=Inf
 
-data_train <- all_data %>% group_by(ID) %>% 
-  mutate( maxJ = max(J)) %>% filter(J <= maxJ*training_pct) %>% dplyr::select(-c(J, maxJ)) %>% ungroup()
-data_test <- all_data %>% group_by(ID) %>% 
-  mutate( maxJ = max(J)) %>% filter(J > maxJ*training_pct) %>%  dplyr::select(-c(J, maxJ)) %>% ungroup()
+data_train <- all_data %>% group_by(ID)  %>% filter(J <= 200) %>% dplyr::select(-J) %>% ungroup()
+data_test <- all_data %>% group_by(ID) %>% filter(J > 200 & J<=400) %>%  dplyr::select(-J) %>% ungroup()
 subjects <- unique(all_data$ID)
 all_predictions <- map_dfr(.x = subjects, n_predictors=n_predictors, train = data_train,
                            test = data_test,threshold = threshold,
@@ -315,14 +359,13 @@ all_predictions_orig <- map_dfr(.x = subjects, n_predictors=n_predictors, train 
                            .f = fit_model)
 ```
 
-
 ```{r, eval=F}
 summarize_preds(all_predictions_orig)
 plot_preds(all_predictions_orig)
 get_roc(all_predictions_orig, individual=T)
 ```
 
-### Distance Metrics 
+### Distance Metrics
 
 ```{r, eval=FALSE}
 training_pct <- 0.75 
@@ -333,27 +376,23 @@ data_test <- all_data %>% group_by(ID) %>%
   mutate( maxJ = max(J)) %>% filter(J > maxJ*training_pct) %>%  dplyr::select(-c(J, maxJ)) %>% ungroup()
 ```
 
-We're interested in looking at a ``distance" between two subjects' data. We consider the Hamming distance, which is the number of bit positions in which the two bits are different between two vectors. For example, 
+We're interested in looking at a \`\`distance" between two subjects' data. We consider the Hamming distance, which is the number of bit positions in which the two bits are different between two vectors. For example,
 
-$$ a = \{1, 2, 0, 0, 7\} $$
-$$b = \{1, 3, 4, 0, 0\} $$ 
-Then Hamming distance$(a,b) = 3$. 
+$$ a = \{1, 2, 0, 0, 7\} $$ $$b = \{1, 3, 4, 0, 0\} $$ Then Hamming distance$(a,b) = 3$.
 
 \vspace{.1in}
 
-In this application, we have two sets of vectors that we're interested in comparing. I consider two ways to calculate the Hamming distance between two sets of vectors. Let the training data for subject 1 be represented as follows, where we have $k$ predictors and $j$ rows of data. 
-$$X_{1, train}= \begin{bmatrix} x_{11}& x_{12} &\dots& x_{1 k} \\
+In this application, we have two sets of vectors that we're interested in comparing. I consider two ways to calculate the Hamming distance between two sets of vectors. Let the training data for subject 1 be represented as follows, where we have $k$ predictors and $j$ rows of data. $$X_{1, train}= \begin{bmatrix} x_{11}& x_{12} &\dots& x_{1 k} \\
   \vdots & \vdots & \vdots & \vdots \\
   x_{j 1} & x_{j2} & \dots & x_{jk} \end{bmatrix}$$
 
-Then we can take the mean of each column and round to the nearest integer to get a "summary" vector for the training data, and do the same for the testing data. 
-$$\overline{X}_{1, train} =  \Big[\big\lfloor\frac{1}{j}\sum_{i=1}^jx_{i1}\big\rfloor, \big\lfloor\frac{1}{j}\sum_{i=1}^jx_{i2}\big\rfloor, \dots,  \big\lfloor\frac{1}{j}\sum_{i=1}^j x_{ik}\big\rfloor\Big] $$
+Then we can take the mean of each column and round to the nearest integer to get a "summary" vector for the training data, and do the same for the testing data. $$\overline{X}_{1, train} =  \Big[\big\lfloor\frac{1}{j}\sum_{i=1}^jx_{i1}\big\rfloor, \big\lfloor\frac{1}{j}\sum_{i=1}^jx_{i2}\big\rfloor, \dots,  \big\lfloor\frac{1}{j}\sum_{i=1}^j x_{ik}\big\rfloor\Big] $$
 
-Then we would calculate Hamming($\overline{X}_{1, train},\overline{X}_{1, test}$, Hamming($\overline{X}_{1, train},\overline{X}_{2, test}$, and so on for all pairwise combinations of training subjects and testing subjects. In total, there are $32*32 = 1024$ pairs to test. 
+Then we would calculate Hamming($\overline{X}_{1, train},\overline{X}_{1, test}$, Hamming($\overline{X}_{1, train},\overline{X}_{2, test}$, and so on for all pairwise combinations of training subjects and testing subjects. In total, there are $32*32 = 1024$ pairs to test.
 
 \vspace{.1in}
 
-We could instead take the median of each column to get the "summary" vector and calculate the Hamming distances as above with each pairwise combination. 
+We could instead take the median of each column to get the "summary" vector and calculate the Hamming distances as above with each pairwise combination.
 
 $$\widetilde{X}_{1, train} = \Big[med(x_{11}, x_{21}, \dots, x_{j1}), med(x_{12}, x_{22}, \dots, x_{j2}),\dots, med(x_{1k}, x_{2k}, \dots, x_{jk})\Big] $$
 
@@ -392,7 +431,6 @@ ggplot(long, aes(x=test_subj, y =name, fill = scale))+
 # keep playing w this 
 
 ```
-
 
 ### Median Method
 
@@ -437,17 +475,16 @@ ggplot(long, aes(x=test_subj, y =name, fill = scale))+
 
 ```
 
-### A Different Approach to Distances 
+### A Different Approach to Distances
 
-We can think of our data as a 3D image, like these: 
+We can think of our data as a 3D image, like these:
 
+```{r}
 
-```{r} 
-
-train_samp <- df_all %>% filter(ID2==2) %>% mutate(maxJ = max(J)) %>% filter(J <= 0.75*maxJ) %>% dplyr::select(signal_lw, t) %>% mutate(
+train_samp <- df_all %>% filter(ID2==2) %>% mutate(maxJ = max(J)) %>% filter(J <= 0.75*maxJ) %>% dplyr::select(signal_lw, time_s_2) %>% mutate(
       lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
     ) %>% filter(!is.na(lag_signal)) %>% mutate(type = "train")
-test_samp <- df_all %>% filter(ID2==2) %>% mutate(maxJ = max(J)) %>% filter(J > 0.75*maxJ) %>% dplyr::select(signal_lw, t) %>% mutate(
+test_samp <- df_all %>% filter(ID2==2) %>% mutate(maxJ = max(J)) %>% filter(J > 0.75*maxJ) %>% dplyr::select(signal_lw, time_s_2) %>% mutate(
       lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
     ) %>% filter(!is.na(lag_signal)) %>% mutate(type = "test")
 
@@ -456,7 +493,7 @@ test_samp <- df_all %>% filter(ID2==2) %>% mutate(maxJ = max(J)) %>% filter(J > 
 bind_rows(train_samp, test_samp) %>% ggplot(aes(x = lag_signal, y = signal_lw))+stat_density_2d(geom = "raster", aes(fill = after_stat(ndensity)), contour=F)+scale_fill_viridis_c(name = "Density")+
   facet_wrap(.~type)+labs(x = "Lag Signal", y = "Signal", title = "Training and Testing Data for Subject 2", subtitle = "Lag 15sec")
 
-test_samp <- df_all %>% filter(ID2==3) %>% mutate(maxJ = max(J)) %>% filter(J > 0.75*maxJ) %>% dplyr::select(signal_lw, t) %>% mutate(
+test_samp <- df_all %>% filter(ID2==3) %>% mutate(maxJ = max(J)) %>% filter(J > 0.75*maxJ) %>% dplyr::select(signal_lw, time_s_2) %>% mutate(
       lag_signal = lag(signal_lw, n = 15)  # for each second, calculate signal and lagged signal 
     ) %>% filter(!is.na(lag_signal)) %>% mutate(type = "test")
 
@@ -465,9 +502,7 @@ bind_rows(train_samp, test_samp) %>% ggplot(aes(x = lag_signal, y = signal_lw))+
                           subtitle = "Lag 15sec")
 ```
 
-
-We could represent these images as matrices, where entry $x_{ij} = \text{density or number of points}$ where signal is in interval $i$ and lag signal is in interval $j$. Using intervals of 0.25 $m/s^2$, this would result in a 12x12 matrix for each a given lag. For example, the matrix for subject 2, training data, lag 0.15 second is below: 
-
+We could represent these images as matrices, where entry $x_{ij} = \text{density or number of points}$ where signal is in interval $i$ and lag signal is in interval $j$. Using intervals of 0.25 $m/s^2$, this would result in a 12x12 matrix for each a given lag. For example, the matrix for subject 2, training data, lag 0.15 second is below:
 
 ```{r}
 ## below is matrix representation of the image 
@@ -475,14 +510,13 @@ We could represent these images as matrices, where entry $x_{ij} = \text{density
 testing 
 ```
 
+We scale by the number of points to make the result easy to compare for different lags:
 
-We scale by the number of points to make the result easy to compare for different lags: 
-
-```{r,eval=F} 
+```{r,eval=F}
 scaled <- testing/sum(rowSums(as.matrix(testing))); scaled
-``` 
+```
 
-For each subject, we can calculate the matrix of the image for all of the lags, in the training and the testing data, then we can compute the squared Frobenius distance between all combinations of training and testing data. 
+For each subject, we can calculate the matrix of the image for all of the lags, in the training and the testing data, then we can compute the squared Frobenius distance between all combinations of training and testing data.
 
 ```{r}
 
@@ -526,9 +560,9 @@ ggplot(long, aes(x=test_subj, y =name, fill = value))+
 
 ```
 
-### Comparing "Distances" and Predictive Performance 
+### Comparing "Distances" and Predictive Performance
 
-We can look at which subjects are the best predicted: 
+We can look at which subjects are the best predicted:
 
 ```{r}
 differences <- all_predictions %>%  group_by(true_subject, model) %>% summarize(mean_pred = mean(pred)) %>%  
@@ -558,7 +592,7 @@ ggplot(prob_matrix, aes(x = true_subject, y = model, fill = mean_pred))+geom_til
 
 ```
 
-For each subject, we can also look at the difference between the correct probability and the second highest probability: 
+For each subject, we can also look at the difference between the correct probability and the second highest probability:
 
 ```{r}
 differences <- all_predictions %>%  group_by(true_subject, model) %>% summarize(mean_pred = mean(pred)) %>%  
@@ -582,7 +616,6 @@ tab2 <- differences %>% dplyr::select(true_subject, diff, avgdiff) %>% arrange(d
                                                           diff = "Dist Next Highest Prob", avgdiff = "Dist Mean Other Probs") %>% fmt_number(columns  = 2:3, decimals=2)
 gtExtras::gt_two_column_layout(list(tab1, tab2), vwidth=250)
 ```
-
 
 ```{r, eval=F}
 get_grids <- function(subject, n_predictors, train, test, threshold){
@@ -618,8 +651,6 @@ data_train %>% dplyr::select(c(ID, all_of(selected_grids))) %>% group_by(ID) %>%
       theme(axis.text.x = element_text(angle = 90))+scale_y_continuous(breaks=seq(1,32,1))
 ```
 
-
-
 ```{r, eval=F}
 
 
@@ -647,3 +678,44 @@ mean(result); mean(result2); mean(result4)
 
 ```
 
+\vspace{.3 in}
+
+### Next steps
+
+```{=tex}
+\begin{itemize}
+\item Image similarity? 
+\item Clustering based on images? 
+\end{itemize}
+```
+```{r, eval=F}
+# function to save images 
+location <- "lw"
+training_pct = .75
+lag <- 15
+
+plot_dens <- function(subject, training_pct, location, lag, data){ # inputs are subject, pct of training, location, lag (ms), data
+  sig <- paste("signal_", location, sep="")
+  newname <- c(signal = sig, t = "t")
+  g <- data %>% filter(ID2==subject) %>% mutate(maxJ = max(J)) %>% filter(J <= training_pct*maxJ) %>% dplyr::select(sig, t) %>% rename(all_of(newname)) %>% mutate(
+      lag_signal = lag(signal, n = lag)) %>% filter(!is.na(lag_signal)) %>% ggplot(aes(x = lag_signal, y = signal))+stat_density_2d(geom = "raster", aes(fill = after_stat(ndensity)), contour=F)+scale_fill_viridis_c(name = "Density") + theme_void() + scale_x_continuous(limits=c(0,4))+scale_y_continuous(limits=c(0,4))+theme(legend.position="none")+labs(x="", y = "")
+  name = paste("subj_", subject, "_train_lag_", lag, ".jpeg", sep="")
+  ggsave(filename = name, path = "~/Documents/walking_fingerprint_IU/images")
+ g<-  data %>% filter(ID2==subject) %>% mutate(maxJ = max(J)) %>% filter(J > training_pct*maxJ) %>% dplyr::select(sig, t) %>% rename(all_of(newname)) %>% mutate(
+      lag_signal = lag(signal, n = lag)) %>% filter(!is.na(lag_signal)) %>% ggplot(aes(x = lag_signal, y = signal))+stat_density_2d(geom = "raster", aes(fill = after_stat(ndensity)), contour=F)+scale_fill_viridis_c(name = "Density") + theme_void() + scale_x_continuous(limits=c(0,4))+scale_y_continuous(limits=c(0,4))+ theme(legend.position="none")+labs(x="", y = "")
+  name = paste("subj_", subject, "_test_lag_", lag, ".jpeg", sep="")
+ ggsave(filename = name, path = "~/Documents/walking_fingerprint_IU/images")
+}
+
+map(.x = subjects, .f = plot_dens, data = df_all, location="lw", lag=15, training_pct = .75)
+
+library(jpeg)
+
+imgs <- list.files("/Users/lilykoffman/Documents/walking_fingerprint_IU/images", full.names = T)
+img1 <- readJPEG(imgs[1])
+img3 <- readJPEG(imgs[3])
+dim(img1)[1:2]
+img2 <- readJPEG(imgs[2]); dim(img2)[1:2]
+RNiftyReg::similarity(img1, img2)
+RNiftyReg::similarity(img3, img2)
+```
