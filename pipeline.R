@@ -6,7 +6,7 @@ library(readr)
 # run data processing file to get raw processed accelerometry data
 # load all functions in functions.R file 
 # read in 
-df_all <- read_csv("df_all.csv", col_types = cols(...1 = col_skip())) 
+df_all <- read.csv("df_all.csv")[,-1]
 
 # vector of subjects
 subjects <- unique(df_all $ID2)
@@ -16,8 +16,8 @@ time_lags <- seq(15, 90, 15)
 gcell_size <- 0.25
 # location - could use other body parts instead 
 location <- "lw"
-# get grid cell data 
-all_data <- map_dfr_progress(.x = subjects, .f = get_grid_data,
+
+all_data <- map_dfr(.x = subjects, .f = get_grid_data,
                     time_lags = time_lags, gcell_size = gcell_size, location = location, data = df_all)
 # save file to save time in the futur
 # write.csv(all_data, "all_data.csv")
@@ -38,5 +38,4 @@ all_predictions <- map_dfr_progress(.x = subjects, n_predictors=Inf, train = dat
 plot_preds(all_predictions)
 
 summarize_preds(all_predictions)
-
 

@@ -6,16 +6,6 @@ library(gt)
 options(dplyr.summarise.inform = FALSE)
 `%notin%` <- Negate(`%in%`)
 
-map_dfr_progress <- function(.x, .f, ..., .id = NULL) {
-  .f <- purrr::as_mapper(.f, ...)
-  pb <- progress::progress_bar$new(total = length(.x), force = TRUE)
-  
-  f <- function(...) {
-    pb$tick()
-    .f(...)
-  }
-  purrr::map_dfr(.x, f, ..., .id = .id)
-}
 
 get_grid_data  <- function(subject, time_lags, gcell_size, location, data){
   # function to get grid cell data from one subject 
@@ -37,14 +27,13 @@ get_grid_data  <- function(subject, time_lags, gcell_size, location, data){
                  cut_lagsig = cut(lag_signal, breaks = seq(0, max_signal, by = gcell_size), include.lowest = T)) %>% 
       drop_na() %>% # count # points in each "grid cell" 
       count(cut_sig, cut_lagsig, .drop=FALSE) %>% mutate(lag_hz = lag, ID = subject, J = second, cell = paste(cut_sig, cut_lagsig, lag_hz)) %>%
-      dplyr::select(n, ID, J, cell)
+      dplyr::select(n, ID, J, cell) 
   }
   # apply above function over all seconds and lags, return df
-  map2_dfr(.x = seconds, .y = lags, 
+  map2_dfr(.x = seconds, .y = lags,
            .f = get_grid_data_lagsec) %>% pivot_wider(id_cols = c(ID, J), names_from = cell, values_from = n) 
   # apply across all seconds and lags 
 }
-
 
 fit_model <- function(subject, n_predictors, train, test, threshold){
   # first filter to grids above threshold 
@@ -80,6 +69,7 @@ fit_model <- function(subject, n_predictors, train, test, threshold){
   return(cbind(pred, rep(subject, length(pred)), test$ID) %>% data.frame() %>% rename(model = V2, true_subject = V3))
 }
 
+
 extract_models <- function(subject, n_predictors, train, test, threshold){
   # first filter to grids above threshold 
   grids <- train %>% filter(ID==subject) %>% pivot_longer(cols = -ID) %>% 
@@ -113,6 +103,7 @@ extract_models <- function(subject, n_predictors, train, test, threshold){
   # return data frame with predictions, model, and subject 
   return(mod)
 }
+
 
 summarize_preds <- function(all_predictions){
   # group by the true subject and the model
@@ -157,7 +148,7 @@ plot_preds <- function(all_predictions, title=NULL){
   else{g + ggtitle(paste(title))}
 }
 
-# function to run all of the above in one line 
+# funtction to run all of the above in one line 
 pipeline <- function(data, location, training_pct, time_lags, gcell_size, threshold, n_predictors){
   # get vector of subjects 
   subjects <- data %>% dplyr::select(ID2) %>% distinct() %>% unlist()

@@ -17,12 +17,14 @@ if (!dir.exists(acc_dat.dir) & !file.exists(acc_dat.zip)) {
   file.remove(acc_dat.zip)
 }
 
+
 # get names of files 
 files <-
   list.files(
     "/Users/lilykoffman/Documents/walking_fingerprint_IU/data/IU_walking_driving_climbing/raw_accelerometry_data",
-    full.names = T
-  )
+    full.names = T)
+
+
 # function to read files and create ID column 
 read_files <- function(x) {
   readr::read_csv(x, show_col_types = F) %>% mutate(ID = sub(".csv.*", "", sub(".*id", "", x)))
