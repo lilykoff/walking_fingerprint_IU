@@ -27,3 +27,7 @@ File Description
 -   Fingerprinting Vignette.Rmd
 
     -   Description of study and illustration of data and process
+
+-   figures.R
+
+    -   All code used to generate figures displayed in the manuscript
