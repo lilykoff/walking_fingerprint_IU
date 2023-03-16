@@ -300,5 +300,7 @@ fingerprints <- map(.x = selected_subs, .f = fingerprint,lags = seq(15, 90, 15),
 
 ggpubr::ggarrange(plotlist = fingerprints, nrow=4)
 
+
 # supplemental figures can be generated using fingerprints function as well 
+
 
