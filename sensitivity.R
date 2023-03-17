@@ -4,6 +4,7 @@ library(viridis)
 library(gt)
 library(moments)
 library(tidyverse)
+options(dplyr.summarise.inform = FALSE)
 
 df_all <- read.csv("df_all.csv")[,-1]
 
@@ -12,7 +13,7 @@ time_lags <- seq(15, 90, 15)
 gcell_size <- 0.25
 location <- "lw"
 #all_data <- map_dfr_progress(.x = subjects, .f = get_grid_data, time_lags = time_lags, gcell_size = gcell_size, location = location, data = df_all)
-
+options(dplyr.summarise.inform = FALSE)
 all_data <- read_csv("all_data.csv")[,-1]
 
 
@@ -264,6 +265,14 @@ all_predictions <- map_dfr_progress(.x = subjects, n_predictors=n_predictors, tr
                                     .f = fit_model)
 
 summarize_preds(all_predictions)
+
+# using only 20 predictors 
+all_predictions_20 <- map_dfr_progress(.x = subjects, n_predictors=20, train = data_train,
+                                    test = data_test,threshold = threshold,
+                                    .f = fit_model)
+
+summarize_preds(all_predictions_20)
+plot_preds(all_predictions_20, title = "20 Predictors")
 
 # visualization
 plot_preds(all_predictions, title = "Original Method")
